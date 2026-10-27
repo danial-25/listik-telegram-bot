@@ -8,7 +8,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from telegram import Message, MessageOriginChannel, ReactionTypeEmoji, Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -253,16 +253,20 @@ async def on_auto_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 def resolve_post(message: Message, context: ContextTypes.DEFAULT_TYPE):
     """Return the list key this comment or reply belongs to."""
     reply = message.reply_to_message
-    if reply is not None:
+    for _ in range(20):
+        if reply is None:
+            break
         group_list_key = context.bot_data.get("list_message_keys", {}).get(
             (reply.chat_id, reply.message_id)
         )
         if group_list_key is not None:
             return group_list_key
-    if reply is not None and reply.is_automatic_forward:
-        origin = reply.forward_origin
-        if isinstance(origin, MessageOriginChannel):
-            return origin.chat.id, origin.message_id
+        if reply.is_automatic_forward:
+            origin = reply.forward_origin
+            if isinstance(origin, MessageOriginChannel):
+                return origin.chat.id, origin.message_id
+        reply = reply.reply_to_message
+
     if message.message_thread_id is not None:
         return context.bot_data.get("threads", {}).get(
             (message.chat_id, message.message_thread_id)
@@ -320,20 +324,6 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     logger.info("Saved number %s for user %s", num, user.id)
 
     try:
-        await context.bot.set_message_reaction(
-            chat_id=message.chat_id,
-            message_id=message.message_id,
-            reaction=ReactionTypeEmoji("❤"),
-        )
-    except BadRequest as e:
-        logger.warning(
-            "Could not react to accepted comment %s in chat %s: %s",
-            message.message_id,
-            message.chat_id,
-            e,
-        )
-
-    try:
         await context.bot.edit_message_text(
             chat_id=data["channel_id"],
             message_id=data["msg_id"],
@@ -343,6 +333,20 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except BadRequest as e:
         if "not modified" not in str(e).lower():
             raise
+
+    try:
+        await context.bot.set_message_reaction(
+            chat_id=message.chat_id,
+            message_id=message.message_id,
+            reaction=ReactionTypeEmoji("❤"),
+        )
+    except TelegramError as e:
+        logger.warning(
+            "Could not react to accepted comment %s in chat %s: %s",
+            message.message_id,
+            message.chat_id,
+            e,
+        )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
