@@ -256,6 +256,11 @@ def resolve_post(message: Message, context: ContextTypes.DEFAULT_TYPE):
     for _ in range(20):
         if reply is None:
             break
+        comment_key = context.bot_data.get("comment_message_keys", {}).get(
+            (reply.chat_id, reply.message_id)
+        )
+        if comment_key is not None:
+            return comment_key
         group_list_key = context.bot_data.get("list_message_keys", {}).get(
             (reply.chat_id, reply.message_id)
         )
@@ -288,6 +293,9 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if key is None:
         logger.debug("Dropped comment: could not resolve its channel post")
         return
+    context.bot_data.setdefault("comment_message_keys", {})[
+        (message.chat_id, message.message_id)
+    ] = key
 
     data = context.bot_data.get("lists", {}).get(key)
     if data is None:
@@ -403,7 +411,10 @@ def build_application():
         group=-1,
     )
     application.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & filters.TEXT, on_group_list),
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.TEXT & filters.Regex(CMD_RE),
+            on_group_list,
+        ),
         group=-1,
     )
     application.add_handler(
