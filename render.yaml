@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: listik-telegram-bot
+    runtime: docker
+    plan: free
+    repo: https://github.com/danial-25/listik-telegram-bot.git
+    region: frankfurt
+    branch: master
+    buildFilter:
+      paths:
+        - ./**
