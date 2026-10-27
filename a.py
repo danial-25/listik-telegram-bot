@@ -254,6 +254,20 @@ def resolve_post(message: Message, context: ContextTypes.DEFAULT_TYPE):
     """Return the list key this comment or reply belongs to."""
     reply = message.reply_to_message
     lists = context.bot_data.get("lists", {})
+
+    if message.message_thread_id is not None:
+        thread_list_key = next(
+            (
+                key
+                for key, data in lists.items()
+                if data.get("channel_id") == message.chat_id
+                and data.get("msg_id") == message.message_thread_id
+            ),
+            None,
+        )
+        if thread_list_key is not None:
+            return thread_list_key
+
     for _ in range(20):
         if reply is None:
             break
