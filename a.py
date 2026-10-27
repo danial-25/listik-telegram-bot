@@ -253,9 +253,21 @@ async def on_auto_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 def resolve_post(message: Message, context: ContextTypes.DEFAULT_TYPE):
     """Return the list key this comment or reply belongs to."""
     reply = message.reply_to_message
+    lists = context.bot_data.get("lists", {})
     for _ in range(20):
         if reply is None:
             break
+        direct_list_key = next(
+            (
+                key
+                for key, data in lists.items()
+                if data.get("channel_id") == reply.chat_id
+                and data.get("msg_id") == reply.message_id
+            ),
+            None,
+        )
+        if direct_list_key is not None:
+            return direct_list_key
         comment_key = context.bot_data.get("comment_message_keys", {}).get(
             (reply.chat_id, reply.message_id)
         )
@@ -276,6 +288,22 @@ def resolve_post(message: Message, context: ContextTypes.DEFAULT_TYPE):
         return context.bot_data.get("threads", {}).get(
             (message.chat_id, message.message_thread_id)
         )
+
+    if message.reply_to_message is not None:
+        candidates = [
+            key
+            for key, data in lists.items()
+            if data.get("channel_id") == message.chat_id
+            and (message.chat_id, data.get("msg_id"))
+            in context.bot_data.get("list_message_keys", {})
+        ]
+        if len(candidates) == 1:
+            logger.debug(
+                "Using the only generated group list in chat %s for reply %s",
+                message.chat_id,
+                message.message_id,
+            )
+            return candidates[0]
     return None
 
 
