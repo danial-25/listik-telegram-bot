@@ -1,0 +1,7 @@
+.env
+.git
+.gitignore
+__pycache__
+*.py[cod]
+bot-state.pkl
+.zip
