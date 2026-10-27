@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: worker
     name: listik-telegram-bot
     runtime: docker
     plan: free

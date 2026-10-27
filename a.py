@@ -49,8 +49,8 @@ ONE_NUMBER_PER_USER = True  # a user's newer (free) number replaces their older 
 
 # /list                      -> numbers 1..DEFAULT_N
 # /list 20                   -> numbers 1..20
-# /list "Saturday football"  -> with description (quoted text can be anywhere in the post)
-# /list 20 "Saturday football"
+# "Saturday football" /list  -> list name
+# "Saturday football" /list 20
 CMD_RE = re.compile(r"(?<!\S)/list(?:@\w+)?(?!\w)(?:[ \t]+(\d+)(?!\w))?")
 QUOTES = "\"\u201c\u201d\u201e\u201f\u00ab\u00bb\u2033\uff02"  # " “ ” „ ‟ « » ″ ＂
 DESC_RE = re.compile(rf"[{QUOTES}](.+?)[{QUOTES}]", re.DOTALL)
@@ -83,6 +83,11 @@ def render(desc: str | None, slots: dict) -> str:
         for num in sorted(slots):
             lines.append(f"{num}. {display_name(slots[num])}")
     return "\n".join(lines)
+
+
+def list_name(text: str, command_match: re.Match[str]) -> str | None:
+    desc_match = DESC_RE.search(text, 0, command_match.start())
+    return desc_match.group(1).strip() if desc_match else None
 
 
 async def hello(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -133,8 +138,7 @@ async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     n = int(match.group(1)) if match.group(1) else DEFAULT_N
     n = max(1, min(n, MAX_N))
-    desc_match = DESC_RE.search(text)
-    desc = desc_match.group(1).strip() if desc_match else None
+    desc = list_name(text, match)
 
     lists = context.bot_data.setdefault("lists", {})
     key = (post.chat_id, post.message_id)
@@ -179,8 +183,7 @@ async def on_group_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     n = int(match.group(1)) if match.group(1) else DEFAULT_N
     n = max(1, min(n, MAX_N))
-    desc_match = DESC_RE.search(message.text)
-    desc = desc_match.group(1).strip() if desc_match else None
+    desc = list_name(message.text, match)
     key = (message.chat_id, message.message_id)
     lists = context.bot_data.setdefault("lists", {})
     if key in lists:
