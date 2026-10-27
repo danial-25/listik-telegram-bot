@@ -206,6 +206,7 @@ async def on_group_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     context.bot_data.setdefault("list_message_keys", {})[
         (message.chat_id, sent.message_id)
     ] = key
+    context.bot_data.setdefault("active_group_lists", {})[message.chat_id] = key
     logger.info(
         "Group list created for message %s -> list message %s, N=%s, desc=%r",
         key,
@@ -303,21 +304,36 @@ def resolve_post(message: Message, context: ContextTypes.DEFAULT_TYPE):
             (message.chat_id, message.message_thread_id)
         )
 
-    if message.reply_to_message is not None:
-        candidates = [
-            key
-            for key, data in lists.items()
-            if data.get("channel_id") == message.chat_id
-            and (message.chat_id, data.get("msg_id"))
-            in context.bot_data.get("list_message_keys", {})
-        ]
-        if len(candidates) == 1:
-            logger.debug(
-                "Using the only generated group list in chat %s for reply %s",
-                message.chat_id,
-                message.message_id,
-            )
-            return candidates[0]
+    candidates = [
+        key
+        for key, data in lists.items()
+        if data.get("channel_id") == message.chat_id
+        and (message.chat_id, data.get("msg_id"))
+        in context.bot_data.get("list_message_keys", {})
+    ]
+    if message.reply_to_message is not None and len(candidates) == 1:
+        logger.debug(
+            "Using the only generated group list in chat %s for reply %s",
+            message.chat_id,
+            message.message_id,
+        )
+        return candidates[0]
+
+    active_key = context.bot_data.get("active_group_lists", {}).get(message.chat_id)
+    if active_key in lists:
+        logger.debug(
+            "Using active group list %s for message %s",
+            active_key,
+            message.message_id,
+        )
+        return active_key
+    if len(candidates) == 1:
+        logger.debug(
+            "Using the only generated group list in chat %s for message %s",
+            message.chat_id,
+            message.message_id,
+        )
+        return candidates[0]
     return None
 
 
@@ -354,6 +370,7 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     slots = data["slots"]
+    previous_slots = slots.copy()
 
     # First come, first served: updates are handled one at a time in arrival order,
     # so whoever's comment reaches the bot first keeps the number.
@@ -382,6 +399,13 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
     except BadRequest as e:
         if "not modified" not in str(e).lower():
+            slots.clear()
+            slots.update(previous_slots)
+            logger.error(
+                "Could not update list message %s; assignment rolled back: %s",
+                data["msg_id"],
+                e,
+            )
             raise
 
     try:
