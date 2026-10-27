@@ -3,7 +3,9 @@ import logging
 import os
 import random
 import re
+import threading
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from telegram import Message, MessageOriginChannel, ReactionTypeEmoji, Update
 from telegram.error import BadRequest
@@ -347,6 +349,31 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error("Unhandled exception while processing update %r", update, exc_info=context.error)
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path not in {"/", "/health", "/healthz"}:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        body = b"telegram bot is running\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        logger.debug("Health server: " + format, *args)
+
+
+def start_health_server() -> None:
+    port = int(os.environ.get("PORT", "10000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("Health server listening on port %s", port)
+
+
 def build_application():
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN is missing. Add it to the .env file.")
@@ -386,4 +413,5 @@ def build_application():
 
 
 if __name__ == "__main__":
+    start_health_server()
     build_application().run_polling(allowed_updates=Update.ALL_TYPES)

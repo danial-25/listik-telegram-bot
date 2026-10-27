@@ -17,4 +17,6 @@ USER bot
 
 ENV BOT_STATE_PATH=/data/bot-state.pkl
 
+EXPOSE 10000
+
 CMD ["python", "a.py"]
