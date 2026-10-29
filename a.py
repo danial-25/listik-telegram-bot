@@ -1,8 +1,12 @@
+import asyncio
+import hmac
 import html
+import json
 import logging
 import os
 import random
 import re
+import signal
 import threading
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +48,17 @@ TOKEN = os.environ.get("BOT_TOKEN")
 STATE_PATH = Path(
     os.environ.get("BOT_STATE_PATH", Path(__file__).with_name("bot-state.pkl"))
 )
+
+# --- Webhook settings ---
+# Render sets RENDER_EXTERNAL_URL automatically (https://<service>.onrender.com).
+# WEBHOOK_URL overrides it (useful for a custom domain).
+BASE_URL = (os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").rstrip("/")
+# Random string, only A-Z a-z 0-9 _ - allowed. Telegram sends it in a header with every
+# update, so nobody else can post fake updates to your endpoint.
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+WEBHOOK_PATH = "/webhook"
+PORT = int(os.environ.get("PORT", "10000"))
+MAX_BODY = 1_000_000
 
 DEFAULT_N = 100              # highest accepted number when the post has just "/list"
 MAX_N = 2000
@@ -427,42 +442,73 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error("Unhandled exception while processing update %r", update, exc_info=context.error)
 
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        if self.path not in {"/", "/health", "/healthz"}:
-            self.send_response(404)
+# ---------- HTTP server: webhook (POST) + health check for the cron ping (GET) ----------
+def make_handler(application, loop: asyncio.AbstractEventLoop):
+    class WebhookHandler(BaseHTTPRequestHandler):
+        def _reply(self, code: int, body: bytes = b"") -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            return
+            if self.command != "HEAD":
+                self.wfile.write(body)
 
-        body = b"telegram bot is running\n"
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        # Cron job / uptime pings: GET or HEAD on / or /health
+        def do_GET(self) -> None:
+            if self.path in {"/", "/health", "/healthz"}:
+                self._reply(200, b"telegram bot is running\n")
+            else:
+                self._reply(404)
 
-    def log_message(self, format: str, *args: object) -> None:
-        logger.debug("Health server: " + format, *args)
+        do_HEAD = do_GET
 
+        def do_POST(self) -> None:
+            if self.path != WEBHOOK_PATH:
+                self._reply(404)
+                return
 
-def start_health_server() -> None:
-    port = int(os.environ.get("PORT", "10000"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    logger.info("Health server listening on port %s", port)
+            header = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if not hmac.compare_digest(header, WEBHOOK_SECRET):
+                logger.warning("Rejected webhook call with a wrong secret token")
+                self._reply(403)
+                return
+
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if not 0 < length <= MAX_BODY:
+                self._reply(400)
+                return
+
+            try:
+                update = Update.de_json(json.loads(self.rfile.read(length)), application.bot)
+            except Exception:
+                logger.exception("Could not parse webhook body")
+                self._reply(400)
+                return
+
+            # Hand the update to the bot's single, ordered queue and answer Telegram right away.
+            asyncio.run_coroutine_threadsafe(application.update_queue.put(update), loop)
+            self._reply(200, b"ok")
+
+        def log_message(self, format: str, *args: object) -> None:
+            logger.debug("HTTP: " + format, *args)
+
+    return WebhookHandler
 
 
 def build_application():
     if not TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing. Add it to the .env file.")
+        raise RuntimeError("BOT_TOKEN is missing. Add it to the environment or .env file.")
+    if not WEBHOOK_SECRET:
+        raise RuntimeError("WEBHOOK_SECRET is missing (letters, digits, _ and - only).")
+    if not BASE_URL:
+        raise RuntimeError("Set WEBHOOK_URL (or run on Render, which sets RENDER_EXTERNAL_URL).")
 
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    persistence = PicklePersistence(
-        filepath=str(STATE_PATH)
-    )
-    application = (
-        ApplicationBuilder().token(TOKEN).persistence(persistence).build()
-    )
+    persistence = PicklePersistence(filepath=str(STATE_PATH))
+    application = ApplicationBuilder().token(TOKEN).persistence(persistence).build()
 
     application.add_handler(TypeHandler(Update, debug_all), group=-2)
     application.add_handler(CommandHandler("hello", hello))
@@ -493,6 +539,36 @@ def build_application():
     return application
 
 
+async def main() -> None:
+    application = build_application()
+    loop = asyncio.get_running_loop()
+
+    await application.initialize()
+    await application.start()  # starts processing application.update_queue
+
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), make_handler(application, loop))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("HTTP server listening on port %s", PORT)
+
+    await application.bot.set_webhook(
+        url=f"{BASE_URL}{WEBHOOK_PATH}",
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=Update.ALL_TYPES,
+    )
+    logger.info("Webhook set to %s%s", BASE_URL, WEBHOOK_PATH)
+
+    stop = asyncio.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # Windows
+            pass
+    await stop.wait()
+
+    server.shutdown()
+    await application.stop()
+    await application.shutdown()
+
+
 if __name__ == "__main__":
-    start_health_server()
-    build_application().run_polling(allowed_updates=Update.ALL_TYPES)
+    asyncio.run(main())
