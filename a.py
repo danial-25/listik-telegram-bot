@@ -53,8 +53,8 @@ STATE_PATH = Path(
     os.environ.get("BOT_STATE_PATH", Path(__file__).with_name("bot-state.pkl"))
 )
 
-UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
-UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip().strip("\"'").rstrip("/")
+UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip().strip("\"'")
 STATE_KEY = "bot-state"
 _AUTH = {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
 
@@ -83,6 +83,7 @@ async def save_state(bot_data: dict) -> None:
     try:
         blob = base64.b64encode(pickle.dumps(dict(bot_data)))
         await asyncio.to_thread(_push_state, blob)
+        logger.info("State saved to Upstash (%d bytes)", len(blob))
     except Exception:
         logger.exception("Could not save state to Upstash")
 
@@ -562,6 +563,10 @@ def build_application():
         "Loaded state: %d lists, %d threads",
         len(state.get("lists", {})),
         len(state.get("threads", {})),
+    )
+    logger.info(
+        "Upstash: url_set=%s token_set=%s url_starts_with=%r",
+        bool(UPSTASH_URL), bool(UPSTASH_TOKEN), UPSTASH_URL[:8],
     )
     application.add_handler(TypeHandler(Update, debug_all), group=-2)
     application.add_handler(CommandHandler("hello", hello))
