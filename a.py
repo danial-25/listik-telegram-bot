@@ -10,6 +10,10 @@ import signal
 import threading
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import base64
+import pickle
+import httpx
+
 
 from telegram import Message, MessageOriginChannel, ReactionTypeEmoji, Update
 from telegram.error import BadRequest, TelegramError
@@ -48,6 +52,39 @@ TOKEN = os.environ.get("BOT_TOKEN")
 STATE_PATH = Path(
     os.environ.get("BOT_STATE_PATH", Path(__file__).with_name("bot-state.pkl"))
 )
+
+UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+STATE_KEY = "bot-state"
+_AUTH = {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
+
+
+def load_state() -> dict:
+    if not UPSTASH_URL:
+        return {}
+    try:
+        r = httpx.get(f"{UPSTASH_URL}/get/{STATE_KEY}", headers=_AUTH, timeout=15)
+        r.raise_for_status()
+        result = r.json().get("result")
+        return pickle.loads(base64.b64decode(result)) if result else {}
+    except Exception:
+        logger.exception("Could not load state from Upstash")
+        return {}
+
+
+def _push_state(blob: bytes) -> None:
+    r = httpx.post(f"{UPSTASH_URL}/set/{STATE_KEY}", headers=_AUTH, content=blob, timeout=15)
+    r.raise_for_status()
+
+
+async def save_state(bot_data: dict) -> None:
+    if not UPSTASH_URL:
+        return
+    try:
+        blob = base64.b64encode(pickle.dumps(dict(bot_data)))
+        await asyncio.to_thread(_push_state, blob)
+    except Exception:
+        logger.exception("Could not save state to Upstash")
 
 # --- Webhook settings ---
 # Render sets RENDER_EXTERNAL_URL automatically (https://<service>.onrender.com).
@@ -182,6 +219,7 @@ async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         n,
         desc,
     )
+    await save_state(context.bot_data)
 
 
 async def on_group_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -229,6 +267,7 @@ async def on_group_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         n,
         desc,
     )
+    await save_state(context.bot_data)
 
 
 # ---------- 2. Discussion group: map forwards to posts, kill comments of the list post ----------
@@ -259,6 +298,7 @@ async def on_auto_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     threads = context.bot_data.setdefault("threads", {})
     threads[(message.chat_id, message.message_id)] = channel_post
+    await save_state(context.bot_data)
     logger.debug(
         "Thread mapped: %s -> %s",
         (message.chat_id, message.message_id),
@@ -369,6 +409,10 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     context.bot_data.setdefault("comment_message_keys", {})[
         (message.chat_id, message.message_id)
     ] = key
+    cmk = context.bot_data["comment_message_keys"]
+    if len(cmk) > 6000:
+        for old in list(cmk)[:1000]:
+            del cmk[old]
 
     data = context.bot_data.get("lists", {}).get(key)
     if data is None:
@@ -422,6 +466,8 @@ async def on_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 e,
             )
             raise
+
+    await save_state(context.bot_data)
 
     try:
         await context.bot.set_message_reaction(
@@ -506,10 +552,17 @@ def build_application():
     if not BASE_URL:
         raise RuntimeError("Set WEBHOOK_URL (or run on Render, which sets RENDER_EXTERNAL_URL).")
 
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    persistence = PicklePersistence(filepath=str(STATE_PATH))
-    application = ApplicationBuilder().token(TOKEN).persistence(persistence).build()
-
+    # STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # persistence = PicklePersistence(filepath=str(STATE_PATH))
+    # application = ApplicationBuilder().token(TOKEN).persistence(persistence).build()
+    application = ApplicationBuilder().token(TOKEN).build()
+    state = load_state()
+    application.bot_data.update(state)
+    logger.info(
+        "Loaded state: %d lists, %d threads",
+        len(state.get("lists", {})),
+        len(state.get("threads", {})),
+    )
     application.add_handler(TypeHandler(Update, debug_all), group=-2)
     application.add_handler(CommandHandler("hello", hello))
     application.add_handler(
